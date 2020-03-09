@@ -182,7 +182,7 @@ fn EXTI15_10() {
 
                             
 
-                            let output: f32 = 1_f32;
+                            let output: f32 = 0.4_f32;
                             pwm_out.set_duty((65535.0 * (1.0 - output)) as u16);
         
                             // Collect samples if applicable.
