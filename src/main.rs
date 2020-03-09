@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use core::fmt::Write;
 
 
-const pulsesToCombine: usize = 6; // Number of pulses to combine into one sample and PID update.
+const pulsesToCombine: usize = 24; // Number of pulses to combine into one sample and PID update.
 const samples: usize = 1000; // Number of samples to record and print.
 
 static PWM_OUT: Mutex<RefCell<Option<stm32h7xx_hal::pwm::Pwm<TIM1, stm32h7xx_hal::pwm::C1>>>> = Mutex::new(RefCell::new(None));
@@ -152,6 +152,7 @@ fn EXTI15_10() {
     static mut combined: [u32; pulsesToCombine] = [0_u32; pulsesToCombine];
 
     static mut last_error: f32 = 0.0;
+    static mut error_int: f32 = 0.0;
 
     free(|cs| {
         if let Some(ref mut pc_in) = PC_IN.borrow(cs).borrow_mut().deref_mut() {
@@ -181,15 +182,24 @@ fn EXTI15_10() {
                             let count_sum: u32 = combined.iter().sum();
                             let dt: f32 = (count_sum as f32) / 65535.0;
                             let rps: f32 = (pulsesToCombine as f32) / (dt * 24.0);
-                            let error = (10.0 - rps); // Targeting 10
+                            let error = (
+                                if *data_i < 300 {
+                                    10.0
+                                }else if *data_i < 600 {
+                                    14.0
+                                }else {
+                                    6.0
+                                }
+                            ) - rps; // Targeting 10
+                            *error_int += error * dt;
                             let mut output: f32 = 
-                                (0.4 * error) + 
-                                (0.05 * ((error - *last_error) / dt)) + 
-                                0.5;
-
-                            // Update persistent vars
+                                (0.2 * error) + 
+                                (0.007 * *error_int) + 
+                                (0.035 * ((error - *last_error) / dt)) + 
+                                0.3;
                             *last_error = error;
 
+                            // Constrain and set output
                             if output > 1.0 {
                                 output = 1.0;
                             }else if output < 0.0 {
