@@ -47,7 +47,11 @@
                     { "type": "console", "label": "ITM", "port": 0 }
                 ]
             },
-            "preLaunchCommands": ["monitor arm semihosting enable"]
+            "preLaunchCommands": [
+                "monitor arm semihosting enable",
+                // "monitor tpiu config external uart off 0000000 2000000",
+                // "monitor itm port 0 on",
+            ]
         }
     ]
 }
