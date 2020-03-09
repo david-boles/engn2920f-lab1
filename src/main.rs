@@ -151,6 +151,8 @@ fn EXTI15_10() {
     static mut combine_i: usize = 0;
     static mut combined: [u32; pulsesToCombine] = [0_u32; pulsesToCombine];
 
+    static mut last_error: f32 = 0.0;
+
     free(|cs| {
         if let Some(ref mut pc_in) = PC_IN.borrow(cs).borrow_mut().deref_mut() {
             if let Some(ref mut pwm_out) = PWM_OUT.borrow(cs).borrow_mut().deref_mut() {
@@ -179,10 +181,20 @@ fn EXTI15_10() {
                             let count_sum: u32 = combined.iter().sum();
                             let dt: f32 = (count_sum as f32) / 65535.0;
                             let rps: f32 = (pulsesToCombine as f32) / (dt * 24.0);
+                            let error = (10.0 - rps); // Targeting 10
+                            let mut output: f32 = 
+                                (0.4 * error) + 
+                                (0.05 * ((error - *last_error) / dt)) + 
+                                0.5;
 
-                            
+                            // Update persistent vars
+                            *last_error = error;
 
-                            let output: f32 = 0.4_f32;
+                            if output > 1.0 {
+                                output = 1.0;
+                            }else if output < 0.0 {
+                                output = 0.0;
+                            }
                             pwm_out.set_duty((65535.0 * (1.0 - output)) as u16);
         
                             // Collect samples if applicable.
