@@ -14,30 +14,35 @@ use cortex_m_rt::entry;
 
 use cortex_m_semihosting::{hprintln};
 
-use stm32h7xx_hal::{nb::block, serial, pac, timer::GetClk, gpio::ExtiPin, gpio::Edge::RISING, gpio::gpioe::PE11, gpio::gpioe::PE13, gpio::Input, gpio::Output, gpio::Floating, gpio::PushPull, interrupt, device::NVIC, device::TIM2, prelude::*};
+use stm32h7xx_hal::{nb::block, serial, pac, timer::GetClk, gpio::ExtiPin, gpio::Edge::RISING, gpio::gpioe::PE9, gpio::gpioe::PE11, gpio::gpioe::PE13, gpio::Input, gpio::Output, gpio::Floating, gpio::PushPull, interrupt, device::NVIC, device::TIM1, device::TIM2, prelude::*};
 
 use stm32h7xx_hal::hal::digital::v2::{OutputPin, ToggleableOutputPin};
 
 use cortex_m::interrupt::{free, Mutex};
+use cortex_m::peripheral::SYST;
 
 use core::cell::RefCell;
 use core::ops::DerefMut;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::fmt::Write;
 
+
+const pulsesToCombine: usize = 6; // Number of pulses to combine into one sample and PID update.
+const samples: usize = 1000; // Number of samples to record and print.
+
+static PWM_OUT: Mutex<RefCell<Option<stm32h7xx_hal::pwm::Pwm<TIM1, stm32h7xx_hal::pwm::C1>>>> = Mutex::new(RefCell::new(None));
 static PC_IN: Mutex<RefCell<Option<PE11<Input<Floating>>>>> = Mutex::new(RefCell::new(None));
 static PC_TIMER: Mutex<RefCell<Option<stm32h7xx_hal::timer::Timer<TIM2>>>> = Mutex::new(RefCell::new(None));
-static PC_PERIOD: AtomicU32 = AtomicU32::new(0);
+// static PC_PERIOD: AtomicU32 = AtomicU32::new(0);
 
-const samples: usize = 10000; // Number of samples (taken every interrupt) to record and print.
 #[derive(Copy, Clone)]
 struct Sample {
-    i: usize, // Sample index
-    pp: u32, // Pulse period, measured in 1/(2^16)ths of a second
+    dt: f32, // Sample index
+    //pp: u32, // Pulse period, measured in 1/(2^16)ths of a second
     rps: f32, // Revolutions per second (1/24th the frequency of pulses)
 }
 static DATA_I: Mutex<RefCell<usize>> = Mutex::new(RefCell::new(0_usize)); // Index of the sample currently being worked on. = samples indicates capture is complete.
-static DATA: Mutex<RefCell<[Sample; samples]>> = Mutex::new(RefCell::new([Sample{i: 0_usize, pp: 0_u32, rps: 0_f32}; samples]));
+static DATA: Mutex<RefCell<[Sample; samples]>> = Mutex::new(RefCell::new([Sample{dt: 0_f32/*, pp: 0_u32*/, rps: 0_f32}; samples]));
 
 // Output pin for testing
 static TEST: Mutex<RefCell<Option<PE13<Output<PushPull>>>>> = Mutex::new(RefCell::new(None));
@@ -71,8 +76,12 @@ fn main() -> ! {
     let gpioe = stm32_peripherals.GPIOE.split(&mut ccdr.ahb4);
     // PWM output: PE9 (D6) - TIMER_A_PWM1, TIM1_CH1
     let mut pwm_out = stm32_peripherals.TIM1.pwm(gpioe.pe9.into_alternate_af1(), 1000.hz(), &mut ccdr);
-    pwm_out.set_duty(65535_u16/*65535_u16*/);
+    pwm_out.set_duty(65535_u16/*start off*/);
     pwm_out.enable();
+    // Globally expose the pwm output so the interrupt can control it
+    free(|cs| {
+        PWM_OUT.borrow(cs).replace(Some(pwm_out));
+    });
     // Pulse chain input: PE11 (D5)
     let mut pc_in = gpioe.pe11.into_floating_input();
     pc_in.make_interrupt_source(&mut stm32_peripherals.SYSCFG);
@@ -95,16 +104,14 @@ fn main() -> ! {
         TEST.borrow(cs).replace(Some(test));
     });
 
-    let mut delay = cortex_m_peripherals.SYST.delay(ccdr.clocks);
-    
+    let mut delay = cortex_m_peripherals.SYST.delay(ccdr.clocks);   
 
 
 
 
     // Let the disk spin down for a bit before starting PID control, it'll have spun up during init.
     hprintln!("Waiting for the disk to spin down...").unwrap();
-    delay.delay_ms(5000_u16);
-    pwm_out.set_duty(65535_u16 / 2/*65535_u16*/);
+    delay.delay_ms(2000_u16);
     hprintln!("Starting PID controller!").unwrap();
 
     // Enable interrupts
@@ -127,7 +134,7 @@ fn main() -> ! {
                 let data = data_ref.deref_mut();
 
                 for sample in data.iter() {
-                    writeln!(tx, "{},{},{}", sample.i, sample.pp, sample.rps).unwrap();
+                    writeln!(tx, "{},{}", sample.dt/*i, sample.pp*/, sample.rps).unwrap();
                 }
 
                 hprintln!("Data transferred!").unwrap();
@@ -141,34 +148,58 @@ fn main() -> ! {
 
 #[interrupt]
 fn EXTI15_10() {
+    static mut combine_i: usize = 0;
+    static mut combined: [u32; pulsesToCombine] = [0_u32; pulsesToCombine];
+
     free(|cs| {
-        if let Some(ref mut pin) = PC_IN.borrow(cs).borrow_mut().deref_mut() {
-            if let Some(ref mut timer) = PC_TIMER.borrow(cs).borrow_mut().deref_mut() {
-                let mut data_i_ref = DATA_I.borrow(cs).borrow_mut();
-                let mut data_i = data_i_ref.deref_mut();
-                let mut data_ref = DATA.borrow(cs).borrow_mut();
-                let mut data = data_ref.deref_mut();
+        if let Some(ref mut pc_in) = PC_IN.borrow(cs).borrow_mut().deref_mut() {
+            if let Some(ref mut pwm_out) = PWM_OUT.borrow(cs).borrow_mut().deref_mut() {
+                if let Some(ref mut test) = TEST.borrow(cs).borrow_mut().deref_mut() {
+                    if let Some(ref mut timer) = PC_TIMER.borrow(cs).borrow_mut().deref_mut() {
+                        // Capture current count and immediately reset to start counting for the next interrupt
+                        let count: u32 = timer.counter();
+                        timer.reset_counter();
 
-                // Capture current count and immediately reset to start counting for the next interrupt
-                let count: u32 = timer.counter();
-                timer.reset_counter();
+                        test.set_high().unwrap();
 
-                // PID
-                let speed: f32 = 65535.0 / ((count as f32) * 24.0);
+                        // Store this count to get averaged
+                        combined[*combine_i] = count;
+                        *combine_i += 1;
 
-                // Collect samples if applicable.
-                if *data_i < samples {
-                    data[*data_i] = Sample{
-                        i: *data_i,
-                        pp: count,
-                        rps: speed,
-                    };
-                    *data_i += 1;
+                        // If time to update PID...
+                        if *combine_i == pulsesToCombine {
+                            *combine_i = 0;
+                        
+                            let mut data_i_ref = DATA_I.borrow(cs).borrow_mut();
+                            let mut data_i = data_i_ref.deref_mut();
+                            let mut data_ref = DATA.borrow(cs).borrow_mut();
+                            let mut data = data_ref.deref_mut();
+        
+                            // PID
+                            let count_sum: u32 = combined.iter().sum();
+                            let dt: f32 = (count_sum as f32) / 65535.0;
+                            let rps: f32 = (pulsesToCombine as f32) / (dt * 24.0);
+
+                            
+
+                            let output: f32 = 1_f32;
+                            pwm_out.set_duty((65535.0 * (1.0 - output)) as u16);
+        
+                            // Collect samples if applicable.
+                            if *data_i < samples {
+                                data[*data_i] = Sample{
+                                    dt,
+                                    rps,
+                                };
+                                *data_i += 1;
+                            }
+                        }
+
+                        test.set_low().unwrap();
+                    }
                 }
-                
-                PC_PERIOD.store(count, Ordering::Relaxed);
             }
-            pin.clear_interrupt_pending_bit();
+            pc_in.clear_interrupt_pending_bit();
         }
     });
 }
