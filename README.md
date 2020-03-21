@@ -1,2 +1,2 @@
 # ENGN 2920F Lab 1
-The software interacts with the operator through semihosting, it shows up in the OpenOCD console. CSV data is sent to the onboard UART to USB converter, I was able to dump it into a file with `cat /dev/ttyACM0 > data.csv`.
+The software interacts with the operator through semihosting, it shows up in the OpenOCD console. CSV data is sent to the onboard UART to USB converter, I was able to dump it into a file with `cat /dev/ttyACM0 > data.csv`. You can also send commands to the software over UART using ASCII. For example, to set the setpoint to 12.345 revolutions per second you can send "S12345". The PID gains can also be set with 'P', 'I', and 'D'.
