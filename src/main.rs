@@ -203,16 +203,14 @@ fn main() -> ! {
         block!(update_timer.wait()).ok();
     }
 
-    loop {
-        for r in records.iter() {
-            writeln!(tx, "{},{},{},{}", r.0, r.1, r.2, r.3).unwrap(); // Lines written as CSV
-        }
-
-        hprintln!("Data transferred!").unwrap();
-
-        // Wait a while so that the data isn't written out more than once.
-        delay.delay_ms(60000_u16);
+    // Dump the records as CSV
+    hprintln!("Transferring data...").unwrap();
+    for r in records.iter() {
+        writeln!(tx, "{},{},{},{}", r.0, r.1, r.2, r.3).unwrap(); // Lines written as CSV
     }
+    hprintln!("Data transferred!").unwrap();
+
+    loop {}
 }
 
 // Takes in a error speed, returns a normalized error from -1 to 1.
